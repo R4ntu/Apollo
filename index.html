@@ -683,10 +683,12 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
 /* ════════════════════════════════════════════════════════
    CONFIGURAÇÃO
 ════════════════════════════════════════════════════════ */
-const SHEETS_URL = 'https://script.google.com/macros/s/AKfycby8tHMTsNp8nqMHeFO_LtY-aavTvKNKY9f_LfYwQFBmS9lCEcRJb0WT5v25fvxyMPTd/exec';
+const SHEETS_URL    = 'https://script.google.com/macros/s/AKfycby8tHMTsNp8nqMHeFO_LtY-aavTvKNKY9f_LfYwQFBmS9lCEcRJb0WT5v25fvxyMPTd/exec';
 const INITIAL_ADMIN = 'ruan.antunes@shopee.com';
-const LS_USERS  = 'apollo_users_v1';
-const LS_LOCAL  = 'apollo_local_v1';
+const LS_USERS      = 'apollo_users_v2';
+const LS_LOCAL      = 'apollo_local_v1';
+// Prefixo que identifica linhas de config de usuário dentro da aba SOS
+const USER_PREFIX   = '__APOLLO_USER__';
 
 /* ════════════════════════════════════════════════════════
    ITEMS POR PERFIL
@@ -765,35 +767,43 @@ async function initUsers() {
   try { usersCache = JSON.parse(localStorage.getItem(LS_USERS)||'null') || [...DEFAULT_USERS]; }
   catch(e) { usersCache = [...DEFAULT_USERS]; }
 
-  const sheetsUsers = await fetchUsersFromSheets();
-  if (sheetsUsers && sheetsUsers.length > 0) {
-    usersCache = sheetsUsers;
-    localStorage.setItem(LS_USERS, JSON.stringify(usersCache));
+  // Aproveita o cache compartilhado do Sheets
+  const raw = await fetchAllFromSheets();
+  if (raw) {
+    const sheetsUsers = extractUsersFromSheets(raw);
+    if (sheetsUsers && sheetsUsers.length > 0) {
+      // Garante que o admin inicial sempre está presente
+      if (!sheetsUsers.find(u => u.email === INITIAL_ADMIN)) {
+        sheetsUsers.unshift(DEFAULT_USERS[0]);
+      }
+      usersCache = sheetsUsers;
+      saveUsersLocally();
+    }
   }
 }
 
-async function fetchUsersFromSheets() {
-  try {
-    const resp = await fetch(SHEETS_URL + '?action=users', {redirect:'follow', cache:'no-cache'});
-    const text = await resp.text();
-    if (!text.trim().startsWith('{')) throw new Error('not JSON');
-    const json = JSON.parse(text);
-    if (!Array.isArray(json.users)) throw new Error('invalid format');
-    return json.users.map(u => ({
-      ...u,
-      active: u.active===true || u.active==='TRUE' || u.active===1 || u.active==='true'
-    }));
-  } catch(e) { console.warn('[Apollo] fetchUsers failed:', e.message); return null; }
-}
-
-async function pushUserToSheets(action, payload) {
-  try {
-    await fetch(SHEETS_URL, {
-      method:'POST', mode:'no-cors',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action, ...payload})
-    });
-  } catch(e) { console.warn('[Apollo] pushUser failed:', e.message); }
+async function pushUserToSheets(action, user) {
+  // Salva configuração de usuário como linha especial na aba SOS.
+  // O id começa com USER_PREFIX → separado automaticamente dos registros reais.
+  // Última linha por e-mail vence (lógica de "latest wins").
+  const isDelete = action === 'deleteUser';
+  const rec = {
+    id:      `${USER_PREFIX}${String(user.email).replace(/[^a-zA-Z0-9]/g,'_')}`,
+    ts:      new Date().toISOString(),
+    date:    '0001-01-01',       // data sentinela — nunca aparece no dashboard
+    email:   user.email,
+    profile: isDelete ? 'deleted' : (user.profile || 'supervisor'),
+    turno:   'USER_CONFIG',
+    cad: '', area: '', rate: 0,
+    items: {}, justificativas: {}, comprovantes: {},
+    obs: JSON.stringify({
+      name:   user.name || '',
+      active: isDelete ? false : (user.active !== false),
+    }),
+  };
+  await syncToSheets(rec);
+  // Invalida cache para que a próxima busca releia do Sheets
+  _sheetsCache = null;
 }
 
 function getUserByEmail(email) {
@@ -893,13 +903,18 @@ function importUsers(input) {
 /* ════════════════════════════════════════════════════════
    ESTADO
 ════════════════════════════════════════════════════════ */
-let currentUser  = null; // { email, name, profile, cad, turno, area }
+let currentUser  = null;
 let allRecords   = [];
 let localRecords = [];
 let charts       = {};
 let itemState    = {};
 let weeklyStatus = {};
-let currentItems = []; // ITEMS array for current profile
+let currentItems = [];
+
+// Cache único do Sheets (evita fetch duplo em users + dashboard)
+let _sheetsCache     = null;
+let _sheetsCacheTime = 0;
+const CACHE_TTL      = 3 * 60 * 1000; // 3 minutos
 
 /* ════════════════════════════════════════════════════════
    LOCAL STORAGE
@@ -908,18 +923,55 @@ function loadLocalRecs() { try { return JSON.parse(localStorage.getItem(LS_LOCAL
 function saveLocalRecs() { localStorage.setItem(LS_LOCAL, JSON.stringify(localRecords)); }
 
 /* ════════════════════════════════════════════════════════
-   SHEETS
+   SHEETS — fetch único compartilhado
 ════════════════════════════════════════════════════════ */
-async function fetchFromSheets() {
+async function fetchAllFromSheets(force=false) {
+  const now = Date.now();
+  if (!force && _sheetsCache && (now - _sheetsCacheTime) < CACHE_TTL) return _sheetsCache;
   try {
     const resp = await fetch(SHEETS_URL, {method:'GET',redirect:'follow',cache:'no-cache'});
     const text = await resp.text();
     if (!text.trim().startsWith('{')&&!text.trim().startsWith('[')) throw new Error('not JSON');
     const json = JSON.parse(text);
-    if (!Array.isArray(json.records)) throw new Error('invalid format');
-    return json.records.map(parseSheetRow).filter(r=>r.date&&r.email);
-  } catch(e) { console.warn('[Apollo] Sheets GET failed:', e.message); return null; }
+    if (!Array.isArray(json.records)) throw new Error('no records array');
+    _sheetsCache     = json.records.map(parseSheetRow).filter(r => r.email);
+    _sheetsCacheTime = now;
+    return _sheetsCache;
+  } catch(e) { console.warn('[Apollo] fetchAll failed:', e.message); return null; }
 }
+
+/* ── Separa registros operacionais de configs de usuário ── */
+function extractOperationalRecords(rows) {
+  return rows.filter(r =>
+    r.id && !r.id.startsWith(USER_PREFIX) &&   // não é config de usuário
+    r.date && r.date > '0001-01-01' &&          // tem data válida
+    r.email                                      // tem e-mail
+  );
+}
+
+/* ── Extrai usuários armazenados como linhas especiais no SOS ── */
+function extractUsersFromSheets(rows) {
+  const userRows = rows.filter(r => r.id && r.id.startsWith(USER_PREFIX));
+  if (!userRows.length) return null;
+
+  // Última linha por e-mail vence (update mais recente)
+  const byEmail = new Map();
+  userRows
+    .sort((a,b) => a.ts.localeCompare(b.ts)) // ascendente → último sobrescreve
+    .forEach(r => {
+      let extra = {};
+      try { extra = JSON.parse(r.obs || '{}'); } catch(e) {}
+      byEmail.set(r.email.toLowerCase(), {
+        email:   r.email,
+        name:    extra.name    || r.email.split('@')[0],
+        profile: r.profile     || 'supervisor',
+        active:  extra.active  !== false,
+      });
+    });
+
+  return [...byEmail.values()];
+}
+
 function parseSheetRow(row) {
   const allKeys=[...new Set([...ITEMS_SUP,...ITEMS_TL,...ITEMS_COORD].map(i=>i.k))];
   const items={};
@@ -934,17 +986,19 @@ function parseSheetRow(row) {
   let date='',rawDate=row['data']||row['date']||'';
   if(rawDate instanceof Date) date=rawDate.toISOString().split('T')[0];
   else{date=String(rawDate);if(date.includes('/')){const p=date.split('/');if(p.length===3)date=`${p[2].slice(-4)}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;}date=date.slice(0,10);}
+  const idRaw = String(row['id']||'');
   return {
-    id:String(row['id']||Math.random().toString(36).slice(2,9)),
-    ts:String(row['timestamp']||row['ts']||''),
-    date, email:String(row['email']||'').toLowerCase().trim(),
-    cad:String(row['cad']||'').trim(),
-    turno:String(row['turno']||'').trim(),
-    area:String(row['area']||'').trim(),
-    profile:String(row['profile']||'supervisor').trim(),
-    obs:String(row['obs']||'').trim(),
+    id:      idRaw || Math.random().toString(36).slice(2,9),
+    ts:      String(row['timestamp']||row['ts']||''),
+    date,
+    email:   String(row['email']||'').toLowerCase().trim(),
+    cad:     String(row['cad']||'').trim(),
+    turno:   String(row['turno']||'').trim(),
+    area:    String(row['area']||'').trim(),
+    profile: String(row['profile']||'supervisor').trim(),
+    obs:     String(row['obs']||'').trim(),
     items, justificativas:justs, comprovantes:{},
-    rate:+Math.min(1,Math.max(0,rate)).toFixed(3),
+    rate:    +Math.min(1,Math.max(0,rate)).toFixed(3),
   };
 }
 function mergeRecords(sheets,local) {
@@ -1246,15 +1300,24 @@ async function initDashboard(){
   if(!document.getElementById('v-dash').classList.contains('active'))return;
   setDashState('loading');
   localRecords=loadLocalRecs();
-  const sheetsData=await fetchFromSheets();
-  if(sheetsData!==null){
-    allRecords=mergeRecords(sheetsData,localRecords);
+
+  const raw = await fetchAllFromSheets(true); // força refresh
+  if(raw !== null){
+    const opRecs = extractOperationalRecords(raw);
+    allRecords = mergeRecords(opRecs, localRecords.filter(r=>!r.id?.startsWith(USER_PREFIX)));
     setSourcePill('sheets',`🟢 Google Sheets · ${allRecords.length} registros`);
+    // Atualiza cache de usuários ao mesmo tempo
+    const su = extractUsersFromSheets(raw);
+    if(su && su.length > 0){
+      if(!su.find(u=>u.email===INITIAL_ADMIN)) su.unshift(DEFAULT_USERS[0]);
+      usersCache=su; saveUsersLocally();
+    }
   } else {
-    allRecords=localRecords;
+    allRecords=localRecords.filter(r=>!r.id?.startsWith(USER_PREFIX));
     setSourcePill('local','⚠️ Dados locais');
     showToast('⚠ Não foi possível carregar do Sheets','warn');
   }
+
   const lr=document.getElementById('last-refresh');
   if(lr)lr.textContent=`· ${new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}`;
   populateFilters();renderDash();
