@@ -431,8 +431,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
       <!-- Lyre silhouette (center-bottom) -->
       <g transform="translate(680,800)" opacity=".12" fill="rgba(245,210,80,1)">
         <ellipse cx="40" cy="20" rx="38" ry="18"/>
-        <rect x="8" y="0" width="5" height="-40"/>
-        <rect x="67" y="0" width="5" height="-40"/>
+        <rect x="8" y="-40" width="5" height="40"/>
+        <rect x="67" y="-40" width="5" height="40"/>
         <rect x="8" y="-38" width="64" height="5" rx="2"/>
         <line x1="20" y1="-38" x2="25" y2="20" stroke="rgba(245,210,80,1)" stroke-width="2"/>
         <line x1="35" y1="-38" x2="40" y2="20" stroke="rgba(245,210,80,1)" stroke-width="2"/>
@@ -444,9 +444,10 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
   </div>
 
   <div class="login-view-wrap">
-    <!-- Apollo name in background - positioned at bottom like in the reference image -->
-    <div class="apollo-title-bg" style="position:fixed;bottom:0;left:50%;transform:translateX(-50%);top:auto;padding-bottom:0">
-      <h1 style="font-size:clamp(80px,18vw,200px);opacity:.12;line-height:.85">APOLLO</h1>
+    <!-- Apollo name in background -->
+    <div class="apollo-title-bg">
+      <h1>APOLLO</h1>
+      <p>clareza · ordem · excelência</p>
     </div>
 
     <div class="login-card">
@@ -466,9 +467,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
             </g>
           </svg>
         </div>
-        <div style="display:inline-flex;align-items:center;gap:7px;background:rgba(245,166,35,.15);border:1px solid rgba(245,166,35,.3);border-radius:99px;padding:5px 14px;margin-bottom:10px;font-size:11px;font-weight:700;color:var(--gold);letter-spacing:1.5px;text-transform:uppercase">✦ Shopee Fulfillment</div>
-        <h2 style="font-family:'Cinzel',serif;font-size:36px;font-weight:700;letter-spacing:2px;line-height:1;background:linear-gradient(180deg,#FFE082 0%,#F5A623 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:6px">Apollo</h2>
-        <p style="font-size:12px;letter-spacing:2px;color:var(--t2);text-transform:lowercase">clareza, ordem e excelência</p>
+        <h2>APOLLO</h2>
+        <p>clareza · ordem · excelência</p>
       </div>
 
       <div class="fg">
@@ -496,8 +496,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
 
       <div id="login-error" class="login-error"></div>
 
-      <button class="btn-full" id="login-btn" onclick="doLogin()" style="background:linear-gradient(135deg,#F5A623,#E08A00);color:#1a0800;font-weight:900;letter-spacing:.5px;box-shadow:0 4px 24px rgba(245,166,35,.4)">Continuar →</button>
-      <div class="login-footer">Sistema Apollo · Shopee Fulfillment Operations</div>
+      <button class="btn-full" id="login-btn" onclick="doLogin()">Entrar →</button>
+      <div class="login-footer">Apollo · Shopee Fulfillment · Sistema de Gestão de Rotinas</div>
     </div>
   </div>
 </div>
@@ -751,47 +751,92 @@ function getItemsForProfile(profile) {
 }
 
 /* ════════════════════════════════════════════════════════
-   USER MANAGEMENT
+   USER MANAGEMENT — sincronizado com Google Sheets
+   Fluxo: localStorage (imediato) + Sheets (fonte de verdade)
 ════════════════════════════════════════════════════════ */
 const DEFAULT_USERS = [
   {email:INITIAL_ADMIN, name:'Ruan Antunes', profile:'admin', active:true, addedAt:new Date().toISOString()}
 ];
 
-function getUsers() {
-  try { return JSON.parse(localStorage.getItem(LS_USERS) || 'null') || DEFAULT_USERS; }
-  catch(e) { return DEFAULT_USERS; }
+let usersCache = []; // cache em memória
+
+/* Inicializa: carrega local primeiro, depois atualiza do Sheets */
+async function initUsers() {
+  try { usersCache = JSON.parse(localStorage.getItem(LS_USERS)||'null') || [...DEFAULT_USERS]; }
+  catch(e) { usersCache = [...DEFAULT_USERS]; }
+
+  const sheetsUsers = await fetchUsersFromSheets();
+  if (sheetsUsers && sheetsUsers.length > 0) {
+    usersCache = sheetsUsers;
+    localStorage.setItem(LS_USERS, JSON.stringify(usersCache));
+  }
 }
-function saveUsers(u) { localStorage.setItem(LS_USERS, JSON.stringify(u)); }
+
+async function fetchUsersFromSheets() {
+  try {
+    const resp = await fetch(SHEETS_URL + '?action=users', {redirect:'follow', cache:'no-cache'});
+    const text = await resp.text();
+    if (!text.trim().startsWith('{')) throw new Error('not JSON');
+    const json = JSON.parse(text);
+    if (!Array.isArray(json.users)) throw new Error('invalid format');
+    return json.users.map(u => ({
+      ...u,
+      active: u.active===true || u.active==='TRUE' || u.active===1 || u.active==='true'
+    }));
+  } catch(e) { console.warn('[Apollo] fetchUsers failed:', e.message); return null; }
+}
+
+async function pushUserToSheets(action, payload) {
+  try {
+    await fetch(SHEETS_URL, {
+      method:'POST', mode:'no-cors',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({action, ...payload})
+    });
+  } catch(e) { console.warn('[Apollo] pushUser failed:', e.message); }
+}
+
 function getUserByEmail(email) {
-  return getUsers().find(u => u.email.toLowerCase() === email.toLowerCase().trim());
+  return usersCache.find(u => String(u.email).toLowerCase() === email.toLowerCase().trim());
 }
-function addUser() {
+function saveUsersLocally() { localStorage.setItem(LS_USERS, JSON.stringify(usersCache)); }
+
+async function addUser() {
   const email   = document.getElementById('u-email').value.trim().toLowerCase();
   const name    = document.getElementById('u-name').value.trim();
   const profile = document.getElementById('u-profile').value;
-  if (!email || !name || !profile) { showToast('⚠ Preencha todos os campos','warn'); return; }
-  if (!email.includes('@')) { showToast('⚠ E-mail inválido','warn'); return; }
-  const users = getUsers();
-  if (users.find(u => u.email === email)) { showToast('⚠ Usuário já cadastrado','warn'); return; }
-  users.push({email, name, profile, active:true, addedAt:new Date().toISOString()});
-  saveUsers(users);
+  if (!email||!name||!profile)  { showToast('⚠ Preencha todos os campos','warn'); return; }
+  if (!email.includes('@'))     { showToast('⚠ E-mail inválido','warn'); return; }
+  if (getUserByEmail(email))    { showToast('⚠ Usuário já cadastrado','warn'); return; }
+
+  const newUser = {email, name, profile, active:true, addedAt:new Date().toISOString()};
+  usersCache.push(newUser);
+  saveUsersLocally();
   renderUsersTable();
   document.getElementById('u-email').value='';
   document.getElementById('u-name').value='';
-  showToast(`✅ ${name} adicionado como ${profileLabel(profile)}`,'gold');
+  showToast(`✅ ${name} adicionado · Sincronizando…`,'gold');
+  await pushUserToSheets('addUser', newUser);
 }
-function toggleUserActive(email) {
+
+async function toggleUserActive(email) {
   if (email === INITIAL_ADMIN) { showToast('⚠ Não é possível desativar o admin inicial','warn'); return; }
-  const users = getUsers();
-  const u = users.find(u => u.email === email);
-  if (u) { u.active = !u.active; saveUsers(users); renderUsersTable(); }
+  const u = getUserByEmail(email);
+  if (!u) return;
+  u.active = !u.active;
+  saveUsersLocally();
+  renderUsersTable();
+  await pushUserToSheets('updateUser', {email, active: u.active});
 }
-function deleteUser(email) {
+
+async function deleteUser(email) {
   if (email === INITIAL_ADMIN) { showToast('⚠ Não é possível remover o admin inicial','warn'); return; }
   if (!confirm(`Remover ${email}?`)) return;
-  saveUsers(getUsers().filter(u => u.email !== email));
+  usersCache = usersCache.filter(u => u.email !== email);
+  saveUsersLocally();
   renderUsersTable();
-  showToast('🗑️ Usuário removido');
+  showToast('🗑️ Usuário removido · Sincronizando…');
+  await pushUserToSheets('deleteUser', {email});
 }
 function profileLabel(p) {
   return {admin:'Administrador',supervisor:'Supervisor',teamleader:'Team Leader',coordinator:'Coordenador'}[p]||p;
@@ -801,8 +846,7 @@ function profileClass(p) {
 }
 function renderUsersTable() {
   const filter = document.getElementById('u-filter-profile')?.value || '';
-  let users = getUsers();
-  if (filter) users = users.filter(u => u.profile === filter);
+  let users = filter ? usersCache.filter(u => u.profile === filter) : [...usersCache];
   const tbody = document.getElementById('users-tbody');
   if (!tbody) return;
   if (!users.length) { tbody.innerHTML = '<tr><td colspan="5" class="users-empty">Nenhum usuário cadastrado neste perfil.</td></tr>'; return; }
@@ -824,22 +868,23 @@ function toggleAddUser() {
 }
 function exportUsers() {
   const a=document.createElement('a');
-  a.href='data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(getUsers(),null,2));
+  a.href='data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(usersCache,null,2));
   a.download='apollo_usuarios.json'; a.click();
 }
 function importUsers(input) {
   const file = input.files[0]; if(!file) return;
   const reader = new FileReader();
-  reader.onload = e => {
+  reader.onload = async e => {
     try {
       const users = JSON.parse(e.target.result);
       if (!Array.isArray(users)) throw new Error();
-      // Always keep initial admin
-      const hasAdmin = users.find(u=>u.email===INITIAL_ADMIN);
-      if (!hasAdmin) users.unshift(DEFAULT_USERS[0]);
-      saveUsers(users);
+      if (!users.find(u=>u.email===INITIAL_ADMIN)) users.unshift(DEFAULT_USERS[0]);
+      usersCache = users;
+      saveUsersLocally();
       renderUsersTable();
-      showToast(`✅ ${users.length} usuários importados`,'gold');
+      showToast(`✅ ${users.length} usuários importados · Sincronizando…`,'gold');
+      // Sync each user to Sheets
+      for (const u of users) await pushUserToSheets('addUser', u);
     } catch { showToast('❌ Arquivo inválido','err'); }
   };
   reader.readAsText(file);
@@ -1468,6 +1513,8 @@ function exportCSV(){
 ════════════════════════════════════════════════════════ */
 localRecords=loadLocalRecs();
 allRecords=localRecords;
+// Carrega usuários do Sheets (async — login fica disponível imediatamente pelo cache local)
+initUsers();
 renderNav('v-login');
 </script>
 </body>
