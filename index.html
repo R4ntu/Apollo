@@ -797,8 +797,9 @@ async function pushUserToSheets(action, user) {
     cad: '', area: '', rate: 0,
     items: {}, justificativas: {}, comprovantes: {},
     obs: JSON.stringify({
-      name:   user.name || '',
-      active: isDelete ? false : (user.active !== false),
+      name:    user.name || '',
+      active:  isDelete ? false : (user.active !== false),
+      profile: isDelete ? 'deleted' : (user.profile || 'supervisor'),
     }),
   };
   await syncToSheets(rec);
@@ -964,7 +965,7 @@ function extractUsersFromSheets(rows) {
       byEmail.set(r.email.toLowerCase(), {
         email:   r.email,
         name:    extra.name    || r.email.split('@')[0],
-        profile: r.profile     || 'supervisor',
+        profile: extra.profile || r.profile || 'supervisor', // obs.profile tem prioridade
         active:  extra.active  !== false,
       });
     });
