@@ -944,9 +944,10 @@ async function fetchAllFromSheets(force=false) {
 /* ── Separa registros operacionais de configs de usuário ── */
 function extractOperationalRecords(rows) {
   return rows.filter(r =>
-    r.id && !r.id.startsWith(USER_PREFIX) &&   // não é config de usuário
-    r.date && r.date > '0001-01-01' &&          // tem data válida
-    r.email                                      // tem e-mail
+    r.id && !r.id.startsWith(USER_PREFIX) &&  // não é config de usuário
+    r.turno !== 'USER_CONFIG' &&               // guard extra
+    r.date && r.date > '2020-01-01' &&         // data válida e recente
+    r.email
   );
 }
 
@@ -982,12 +983,29 @@ function parseSheetRow(row) {
   });
   const justs={};
   allKeys.forEach(k=>{const v=row['just_'+k];if(v&&String(v).trim())justs[k]=String(v).trim();});
-  let rate=0,rStr=String(row['taxa_%']||row['taxa']||'0').replace('%','').trim();
-  const rNum=parseFloat(rStr)||0; rate=rNum>1?rNum/100:rNum;
   let date='',rawDate=row['data']||row['date']||'';
   if(rawDate instanceof Date) date=rawDate.toISOString().split('T')[0];
   else{date=String(rawDate);if(date.includes('/')){const p=date.split('/');if(p.length===3)date=`${p[2].slice(-4)}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;}date=date.slice(0,10);}
   const idRaw = String(row['id']||'');
+
+  // ── Rate: lê de taxa_% mas recalcula dos itens se vier 0 ou inválido ──
+  let rate=0;
+  const rRaw = row['taxa_%'] || row['taxa'] || row['rate'] || '';
+  const rStr = String(rRaw).replace('%','').replace(',','.').trim();
+  const rNum = parseFloat(rStr);
+  if (!isNaN(rNum) && rNum > 0) {
+    rate = rNum > 1 ? +(rNum/100).toFixed(3) : +rNum.toFixed(3);
+  }
+
+  // Fallback: recalcula rate diretamente dos itens (robusto para qualquer formato de planilha)
+  if (rate === 0) {
+    const allK = [...new Set([...ITEMS_SUP,...ITEMS_TL,...ITEMS_COORD].map(i=>i.k))];
+    const defined = allK.filter(k => items[k] !== undefined);
+    if (defined.length > 0) {
+      rate = +(defined.filter(k => items[k]).length / defined.length).toFixed(3);
+    }
+  }
+
   return {
     id:      idRaw || Math.random().toString(36).slice(2,9),
     ts:      String(row['timestamp']||row['ts']||''),
@@ -999,7 +1017,7 @@ function parseSheetRow(row) {
     profile: String(row['profile']||'supervisor').trim(),
     obs:     String(row['obs']||'').trim(),
     items, justificativas:justs, comprovantes:{},
-    rate:    +Math.min(1,Math.max(0,rate)).toFixed(3),
+    rate,
   };
 }
 function mergeRecords(sheets,local) {
