@@ -670,8 +670,8 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
 /* ══════════════════════════════════════════════════
    CONFIGURAÇÃO
 ══════════════════════════════════════════════════ */
-const SHEETS_URL   = 'https://script.google.com/macros/s/AKfycby8tHMTsNp8nqMHeFO_LtY-aavTvKNKY9f_LfYwQFBmS9lCEcRJb0WT5v25fvxyMPTd/exec';
-const INITIAL_ADMINS = ['ruan.antunes@shopee.com']; // ADMs fixos no código
+const SHEETS_URL   = 'https://script.google.com/macros/s/AKfycbyarRpKWNvcCMmtCsLOfMDBk-fQ8EFvTdW9kwtbVLxo4Sj8ZOe18Jnh7D8IMPM9HetC/exec';
+const INITIAL_ADMINS = ['ruan.antunes@shopee.com','aryane.oliveira@shopee.com']; // ADMs fixos
 const LS_EXTRA_ADMINS = 'apollo_extra_admins';
 const LS_LOCAL        = 'apollo_local_v1';
 
@@ -818,40 +818,88 @@ async function fetchFromSheets() {
 }
 
 function parseSheetRow(row) {
-  const perfil = String(row['perfil'] || row['role'] || 'supervisor').toLowerCase();
-  const roleItems = ROLE_CONFIG[perfil]?.items || ITEMS_SUP;
-  const items = {};
-  roleItems.forEach(it => {
-    const v = row[it.k] ?? row[it.k.toLowerCase()];
-    items[it.k] = v === 'Realizado' || v === '✓' || v === true || v === 1 || v === '1';
+  const allKeys=[...new Set([...ITEMS_SUP,...ITEMS_TL,...ITEMS_COORD].map(i=>i.k))];
+  const items={};
+  allKeys.forEach(k=>{
+    const v=row[k]??row[k.toLowerCase()];
+    items[k]=v==='Realizado'||v==='✓'||v===true||v===1||v==='1';
   });
-  const justificativas = {};
-  roleItems.forEach(it => {
-    const v = row['just_'+it.k]; if(v&&String(v).trim()) justificativas[it.k]=String(v).trim();
-  });
-  let rate = 0;
-  const rStr = String(row['taxa_%']||row['taxa']||'0').replace('%','').trim();
-  const rNum = parseFloat(rStr)||0;
-  rate = rNum > 1 ? rNum/100 : rNum;
-  let date = '';
-  const rawDate = row['data']||row['date']||'';
-  if (rawDate instanceof Date) date = rawDate.toISOString().split('T')[0];
-  else {
-    date = String(rawDate);
-    if(date.includes('/')){const p=date.split('/');if(p.length===3)date=`${p[2].slice(-4)}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;}
-    date = date.slice(0,10);
+  const justs={};
+  allKeys.forEach(k=>{const v=row['just_'+k];if(v&&String(v).trim())justs[k]=String(v).trim();});
+  let date='',rawDate=row['data']||row['date']||'';
+  if(rawDate instanceof Date) date=rawDate.toISOString().split('T')[0];
+  else{date=String(rawDate);if(date.includes('/')){const p=date.split('/');if(p.length===3)date=`${p[2].slice(-4)}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;}date=date.slice(0,10);}
+  const idRaw=String(row['id']||'');
+
+  // ── Detecta desalinhamento de colunas (sheet antigo sem cad/profile) ──
+  // Sintoma: coluna turno tem valor de CAD e coluna area tem T1/T2/T3
+  // Causa: Apollo salva [id,ts,date,email,CAD,turno,area,profile,taxa%,obs,itens...]
+  //        mas sheet antigo tem [id,ts,data,email,turno,area,taxa%,obs,itens...]
+  //        → CAD cai em turno, turno cai em area, area cai em taxa%, profile cai em obs
+  //        → itens ficam deslocados 2 posições
+  const CAD_SET  = new Set(['BRFPE','BRFSP','BRFGO','BRFMG','BRFRS']);
+  const TURN_SET = new Set(['T1','T2','T3']);
+  const AREA_SET = new Set(['Inbound','Picking','Checking','Qualidade','Inventário']);
+  const PROF_SET = new Set(['admin','supervisor','teamleader','coordinator']);
+
+  let cadR   = String(row['cad']||'').trim();
+  let turnoR = String(row['turno']||'').trim();
+  let areaR  = String(row['area']||'').trim();
+  let shifted = false;
+
+  if (!cadR && CAD_SET.has(turnoR) && (TURN_SET.has(areaR)||areaR==='')) {
+    shifted = true;
+    cadR    = turnoR;   // turno col tinha o cad
+    turnoR  = areaR;    // area col tinha o turno
+    // taxa_% col tem o nome da área
+    const areaC = String(row['taxa_%']||'').replace('%','').trim();
+    areaR = AREA_SET.has(areaC) ? areaC : '';
+    // Corrige mapeamento dos itens (deslocados 2 posições)
+    const fixed={};
+    allKeys.forEach((k,i)=>{ fixed[k] = i+2<allKeys.length ? items[allKeys[i+2]] : false; });
+    allKeys.forEach(k=>{ items[k]=fixed[k]||false; });
   }
+
+  // ── Calcula taxa ────────────────────────────────────────────────────
+  let rate=0;
+  if (shifted) {
+    // taxa_% real está na coluna do primeiro item (allKeys[0]='dds'), deslocada 2
+    const r2=String(row[allKeys[0]]||'').replace('%','').replace(',','.').trim();
+    const n2=parseFloat(r2);
+    if(!isNaN(n2)&&n2>0) rate=n2>1?+(n2/100).toFixed(3):+n2.toFixed(3);
+  } else {
+    const rRaw=row['taxa_%']||row['taxa']||row['rate']||'';
+    const rStr=String(rRaw).replace('%','').replace(',','.').trim();
+    const rNum=parseFloat(rStr);
+    if(!isNaN(rNum)&&rNum>0) rate=rNum>1?+(rNum/100).toFixed(3):+rNum.toFixed(3);
+  }
+  // Fallback robusto: calcula dos itens SUP corrigidos
+  if (rate===0) {
+    const supDone = ITEMS_SUP.filter(it=>items[it.k]).length;
+    if (supDone>0) rate=+(supDone/ITEMS_SUP.length).toFixed(3);
+    else {
+      const allDone=allKeys.filter(k=>items[k]).length;
+      if(allDone>0) rate=+(allDone/allKeys.length).toFixed(3);
+    }
+  }
+
+  // Profile: quando shifted, estava na coluna obs
+  const profileRaw = shifted
+    ? (PROF_SET.has(String(row['obs']||'').trim()) ? String(row['obs']).trim() : 'supervisor')
+    : String(row['profile']||row['perfil']||'supervisor').trim();
+
   return {
-    id:String(row['id']||Math.random().toString(36).slice(2,9)),
-    ts:String(row['timestamp']||''), date,
-    email:String(row['email']||'').toLowerCase().trim(),
-    cad:String(row['cad']||'').trim(),
-    turno:String(row['turno']||'').trim(),
-    area:String(row['area']||'').trim(),
-    perfil,
-    obs:String(row['obs']||'').trim(),
-    items, justificativas, comprovantes:{},
-    rate:+Math.min(1,Math.max(0,rate)).toFixed(3),
+    id:     idRaw||Math.random().toString(36).slice(2,9),
+    ts:     String(row['timestamp']||row['ts']||''),
+    date,
+    email:  String(row['email']||'').toLowerCase().trim(),
+    cad:    cadR,
+    turno:  turnoR,
+    area:   areaR,
+    profile:PROF_SET.has(profileRaw)?profileRaw:'supervisor',
+    obs:    shifted?'':String(row['obs']||'').trim(),
+    items, justificativas:justs, comprovantes:{},
+    rate,
   };
 }
 
@@ -913,7 +961,7 @@ function goHome() { showView('v-login'); }
 
 function renderNav(vid) {
   const el=document.getElementById('nav-acts');
-  const role = currentUser?.perfil;
+  const role = currentUser?.profile || currentUser?.perfil;
   const chipClass = role ? ROLE_CONFIG[role]?.chip || '' : '';
   const chipLabel = role ? ROLE_CONFIG[role]?.label || '' : '';
   const roleHtml = role ? `<span class="role-chip ${chipClass}">${chipLabel}</span>` : '';
@@ -1295,7 +1343,7 @@ function getFiltered(){
   const area=document.getElementById('f-area').value;
   const turno=document.getElementById('f-turno').value;
   const cut=days>0?new Date(Date.now()-days*86400000).toISOString().split('T')[0]:'0000-00-00';
-  return allRecords.filter(r=>r.date>=cut&&(!perfil||r.perfil===perfil)&&(!cad||r.cad===cad)&&(!email||r.email===email)&&(!area||r.area===area)&&(!turno||r.turno===turno));
+  return allRecords.filter(r=>r.date>=cut&&(!perfil||r.profile===perfil)&&(!cad||r.cad===cad)&&(!email||r.email===email)&&(!area||r.area===area)&&(!turno||r.turno===turno));
 }
 
 /* ══════════════════════════════════════════════════
@@ -1352,9 +1400,9 @@ function buildWeekComplianceTable(recs){
 
   // Active users = anyone who has records in the last 2 weeks
   const twoWeeksAgo=new Date(Date.now()-14*86400000).toISOString().split('T')[0];
-  const activeUsers=[...new Set(recs.filter(r=>r.date>=twoWeeksAgo).map(r=>({email:r.email,perfil:r.perfil})).map(u=>u.email+':'+u.perfil))];
+  const activeUsers=[...new Set(recs.filter(r=>r.date>=twoWeeksAgo).map(r=>({email:r.email,perfil:r.profile})).map(u=>u.email+':'+u.profile))];
   const userMap={};
-  recs.filter(r=>r.date>=twoWeeksAgo).forEach(r=>{userMap[r.email]={email:r.email,perfil:r.perfil};});
+  recs.filter(r=>r.date>=twoWeeksAgo).forEach(r=>{userMap[r.email]={email:r.email,perfil:r.profile};});
   const weekRecs=recs.filter(r=>r.date>=mondayStr);
 
   // Today done/pending
@@ -1367,13 +1415,13 @@ function buildWeekComplianceTable(recs){
   const pendList=document.getElementById('today-pend-list');
   if(doneList) doneList.innerHTML=[...todayDone].map(email=>{
     const name=email.split('@')[0].replace('.',' ').replace(/\b\w/g,c=>c.toUpperCase());
-    const p=userMap[email]?.perfil||'';
+    const p=userMap[email]?.profile||'';
     const cfg=ROLE_CONFIG[p];
     return `<div class="today-user done"><div class="tu-dot"></div>${name}${cfg?`<span class="role-chip ${cfg.chip}" style="padding:1px 6px;font-size:9px">${cfg.label}</span>`:''}</div>`;
   }).join('')||`<div class="today-empty">Nenhum registro ainda.</div>`;
   if(pendList) pendList.innerHTML=todayPend.map(u=>{
     const name=u.email.split('@')[0].replace('.',' ').replace(/\b\w/g,c=>c.toUpperCase());
-    const cfg=ROLE_CONFIG[u.perfil];
+    const cfg=ROLE_CONFIG[u.profile];
     return `<div class="today-user pend"><div class="tu-dot"></div>${name}${cfg?`<span class="role-chip ${cfg.chip}" style="padding:1px 6px;font-size:9px">${cfg.label}</span>`:''}</div>`;
   }).join('')||`<div class="today-empty">Todos preencheram hoje! ✅</div>`;
 
@@ -1388,7 +1436,7 @@ function buildWeekComplianceTable(recs){
   </tr>`;
 
   Object.values(userMap).forEach(u=>{
-    const cfg=ROLE_CONFIG[u.perfil];
+    const cfg=ROLE_CONFIG[u.profile];
     const name=u.email.split('@')[0].replace('.',' ').replace(/\b\w/g,c=>c.toUpperCase());
     let doneCount=0,expectedCount=0;
     const cells=days.map(day=>{
@@ -1448,7 +1496,7 @@ function chartAreas(recs){
 
 function buildRanks(recs){
   const sr={};
-  recs.forEach(r=>{if(!sr[r.email])sr[r.email]={rs:[],c:0,cad:r.cad||'',perfil:r.perfil||''};sr[r.email].rs.push(r.rate);sr[r.email].c++;});
+  recs.forEach(r=>{if(!sr[r.email])sr[r.email]={rs:[],c:0,cad:r.cad||'',perfil:r.profile||''};sr[r.email].rs.push(r.rate);sr[r.email].c++;});
   const ranked=Object.entries(sr).map(([email,{rs,c,cad,perfil}])=>({email,cad,perfil,pct:Math.round(avg(rs)*100),c})).sort((a,b)=>b.pct-a.pct);
   drawRank('rank-top',ranked.slice(0,6),true);
   drawRank('rank-bot',[...ranked].sort((a,b)=>a.pct-b.pct).slice(0,6),false);
@@ -1462,7 +1510,7 @@ function drawRank(id,items,top){
     const name=it.email.split('@')[0].replace('.',' ').replace(/\b\w/g,c=>c.toUpperCase());
     const fill=top?`linear-gradient(90deg,var(--green),rgba(34,197,94,.4))`:it.pct>=60?`var(--amber)`:`var(--red)`;
     const pc=it.pct>=80?'var(--green)':it.pct>=60?'var(--amber)':'var(--red)';
-    const cfg=ROLE_CONFIG[it.perfil];
+    const cfg=ROLE_CONFIG[it.profile];
     const chip=cfg?`<span class="role-chip ${cfg.chip}" style="padding:1px 5px;font-size:8px">${cfg.label}</span>`:'';
     return `<div class="rank-row">
       <div class="rn ${cls}">${i+1}</div>
@@ -1525,7 +1573,7 @@ function exportCSV(){
   if(!recs.length){showToast('⚠ Nenhum dado para exportar','warn');return;}
   const allKeys=[...new Set(recs.flatMap(r=>Object.keys(r.items||{})))];
   const hdr=['id','data','email','perfil','cad','turno','area','taxa_%','obs',...allKeys];
-  const rows=recs.map(r=>[r.id,r.date,r.email,r.perfil,r.cad||'',r.turno,r.area,Math.round(r.rate*100),(r.obs||'').replace(/,/g,' '),...allKeys.map(k=>r.items?.[k]?1:0)]);
+  const rows=recs.map(r=>[r.id,r.date,r.email,r.profile,r.cad||'',r.turno,r.area,Math.round(r.rate*100),(r.obs||'').replace(/,/g,' '),...allKeys.map(k=>r.items?.[k]?1:0)]);
   const csv=[hdr,...rows].map(r=>r.join(',')).join('\n');
   const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);a.download=`apollo_${new Date().toISOString().split('T')[0]}.csv`;a.click();
 }
