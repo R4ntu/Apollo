@@ -671,6 +671,14 @@ body{font-family:'DM Sans',system-ui,sans-serif;background:var(--bg0);color:var(
    CONFIGURAÇÃO
 ══════════════════════════════════════════════════ */
 const SHEETS_URL   = 'https://script.google.com/macros/s/AKfycbyarRpKWNvcCMmtCsLOfMDBk-fQ8EFvTdW9kwtbVLxo4Sj8ZOe18Jnh7D8IMPM9HetC/exec';
+
+// Retorna data local no formato YYYY-MM-DD (evita erro de fuso UTC)
+function localDate(d) {
+  const dt = d || new Date();
+  return dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+}
+// Data local N dias atrás
+function localDateAgo(days) { return localDate(new Date(Date.now() - days*86400000)); }
 const INITIAL_ADMINS = ['ruan.antunes@shopee.com','aryane.oliveira@shopee.com']; // ADMs fixos
 const LS_EXTRA_ADMINS = 'apollo_extra_admins';
 const LS_LOCAL        = 'apollo_local_v1';
@@ -921,8 +929,8 @@ async function syncToSheets(rec) {
 function calcWeeklyStatus(email) {
   const now=new Date(),dow=now.getDay(),diff=dow===0?6:dow-1;
   const monday=new Date(now); monday.setDate(now.getDate()-diff);
-  const mondayStr=monday.toISOString().split('T')[0];
-  const todayStr=now.toISOString().split('T')[0];
+  const mondayStr=localDate(monday);
+  const todayStr=localDate(now);
   const weekRecs=allRecords.filter(r=>r.email===email&&r.date>=mondayStr&&r.date<todayStr);
   const result={};
   WEEK_ITEMS.forEach(it=>{
@@ -1050,7 +1058,7 @@ function buildForm() {
 
   document.getElementById('form-date').textContent=today.charAt(0).toUpperCase()+today.slice(1);
 
-  const ds=new Date().toISOString().split('T')[0];
+  const ds=localDate();
   const ex=allRecords.find(r=>r.email===email&&r.date===ds);
   document.getElementById('already-msg').innerHTML=ex
     ?`<div class="already-done"><div class="dot-live"></div><span>Você já preencheu hoje. Pode atualizar o registro abaixo.</span></div>`:'';
@@ -1257,7 +1265,7 @@ function validateForm(){
 async function submitForm(){
   if(!validateForm()) return;
   const {email,cad,turno,area,perfil}=currentUser;
-  const ds=new Date().toISOString().split('T')[0];
+  const ds=localDate();
   const items={},justificativas={},comprovantes={};
   ITEMS.forEach(it=>{
     const s=itemState[it.k];
@@ -1342,7 +1350,7 @@ function getFiltered(){
   const email=document.getElementById('f-email').value;
   const area=document.getElementById('f-area').value;
   const turno=document.getElementById('f-turno').value;
-  const cut=days>0?new Date(Date.now()-days*86400000).toISOString().split('T')[0]:'0000-00-00';
+  const cut=days>0?localDateAgo(days):'0000-00-00';
   return allRecords.filter(r=>r.date>=cut&&(!perfil||r.profile===perfil)&&(!cad||r.cad===cad)&&(!email||r.email===email)&&(!area||r.area===area)&&(!turno||r.turno===turno));
 }
 
@@ -1368,9 +1376,9 @@ function renderDash(){
 /* KPIs */
 function renderKPIs(recs){
   const n=recs.length,avgR=n?avg(recs.map(r=>r.rate)):0;
-  const todayStr=new Date().toISOString().split('T')[0];
+  const todayStr=localDate();
   const todayUsers=new Set(recs.filter(r=>r.date===todayStr).map(r=>r.email));
-  const recentUsers=new Set(recs.filter(r=>{const d=new Date(Date.now()-14*86400000).toISOString().split('T')[0];return r.date>=d;}).map(r=>r.email));
+  const recentUsers=new Set(recs.filter(r=>{return r.date>=localDateAgo(14);}).map(r=>r.email));
   const pendingToday=recentUsers.size-todayUsers.size;
   const supR={};
   recs.forEach(r=>{if(!supR[r.email])supR[r.email]=[];supR[r.email].push(r.rate);});
@@ -1393,13 +1401,13 @@ function renderKPIs(recs){
 function buildWeekComplianceTable(recs){
   const now=new Date(),dow=now.getDay(),diff=dow===0?6:dow-1;
   const monday=new Date(now); monday.setDate(now.getDate()-diff);
-  const todayStr=now.toISOString().split('T')[0];
+  const todayStr=localDate(now);
   const days=[]; const dayNames=['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
-  for(let i=0;i<7;i++){const d=new Date(monday);d.setDate(monday.getDate()+i);days.push(d.toISOString().split('T')[0]);}
+  for(let i=0;i<7;i++){const d=new Date(monday);d.setDate(monday.getDate()+i);days.push(localDate(d));}
   const mondayStr=days[0];
 
   // Active users = anyone who has records in the last 2 weeks
-  const twoWeeksAgo=new Date(Date.now()-14*86400000).toISOString().split('T')[0];
+  const twoWeeksAgo=localDateAgo(14);
   const activeUsers=[...new Set(recs.filter(r=>r.date>=twoWeeksAgo).map(r=>({email:r.email,perfil:r.profile})).map(u=>u.email+':'+u.profile))];
   const userMap={};
   recs.filter(r=>r.date>=twoWeeksAgo).forEach(r=>{userMap[r.email]={email:r.email,perfil:r.profile};});
@@ -1575,7 +1583,7 @@ function exportCSV(){
   const hdr=['id','data','email','perfil','cad','turno','area','taxa_%','obs',...allKeys];
   const rows=recs.map(r=>[r.id,r.date,r.email,r.profile,r.cad||'',r.turno,r.area,Math.round(r.rate*100),(r.obs||'').replace(/,/g,' '),...allKeys.map(k=>r.items?.[k]?1:0)]);
   const csv=[hdr,...rows].map(r=>r.join(',')).join('\n');
-  const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);a.download=`apollo_${new Date().toISOString().split('T')[0]}.csv`;a.click();
+  const a=document.createElement('a');a.href='data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);a.download=`apollo_${localDate()}.csv`;a.click();
 }
 
 /* ══════════════════════════════════════════════════
